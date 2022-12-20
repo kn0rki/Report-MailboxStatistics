@@ -1,24 +1,33 @@
-$Group = "Domain Users"
-$CountTopFolder = 10
-$ReportMailboxSizeInMB = 5000
+param (
+  $users
+)
 
-$SMTPServer = "smtp.domain.tld"
-$From = "postfachbericht@domain.tld"
+$CountTopFolder = 10
+$ReportMailboxSizeInMB = 1800
+
+$SMTPServer = ""
+$From = ""
 $Subject = "Postfach Übersicht"
 
 [System.Collections.ArrayList]$MailboxStatistics = @()
-$GroupMembers = Get-ADGroup $Group | Get-ADGroupMember -Recursive | Get-ADUser -Properties msExchMailboxGuid | where {$_.msExchMailboxGuid -ne $Null}
-foreach ($GroupMember in $GroupMembers) {
- $Mailbox = get-mailbox $GroupMember.SamAccountName
- $EMail = $Mailbox.PrimarySmtpAddress.Address
- $Stats = $Mailbox | Get-MailboxStatistics | select displayname, @{label="Size"; expression={$_.TotalItemSize.Value.ToMB()}}
+foreach ($user in $users) {
+ $Mailbox = get-mailbox $user.SamAccountName
+ $EMail = $Mailbox.PrimarySmtpAddress
+ $Stats = $Mailbox | Get-MailboxStatistics | Select-Object displayname, @{label="Size"; expression={$_.TotalItemSize.Value.ToMB()}}
  $Displayname = $Stats.Displayname
  $MailboxSize = $Stats.Size
  if ($MailboxSize -ge $ReportMailboxSizeInMB) {
-  $MailboxFolderStatistics = Get-MailboxFolderStatistics $mailbox | select FolderPath,FolderSize,ItemsInFolder
-  $TopFoldersBySize = $MailboxFolderStatistics | Select-Object FolderPath,@{Name="Foldersize";Expression={ [long]$a = "{0:N2}" -f ((($_.FolderSize -replace "[0-9\.]+ [A-Z]* \(([0-9,]+) bytes\)","`$1") -replace ",","")); [math]::Round($a/1MB,2) }}  | sort foldersize -Descending | select -first $CountTopFolder
-  $TopFoldersByItems = $MailboxFolderStatistics | sort ItemsInFolder -Descending | select -first $CountTopFolder
- 
+  $MailboxFolderStatistics = Get-MailboxFolderStatistics $mailbox | Select-Object FolderPath,FolderSize,ItemsInFolder
+
+  $TopFoldersBySize = $MailboxFolderStatistics |
+    Select-Object FolderPath,@{
+      Name="Foldersize";Expression={
+        [long]$a = "{0:N2}" -f ((($_.FolderSize -replace "[0-9\.]+ [A-Z]* \(([0-9,]+) bytes\)","`$1") -replace ",","")); [math]::Round($a/1MB,2) }}  |
+    Sort-Object foldersize -Descending |
+    Select-Object -first $CountTopFolder
+
+  $TopFoldersByItems = $MailboxFolderStatistics | Sort-Object ItemsInFolder -Descending | Select-Object -first $CountTopFolder
+
   $Statistic = [PSCustomObject]@{
 	 DisplayName = $Displayname
 	 EMail = $EMail
@@ -26,12 +35,29 @@ foreach ($GroupMember in $GroupMembers) {
 	 TopFoldersBySize = $TopFoldersBySize
 	 TopFoldersByItems = $TopFoldersByItems
 	}
-  $MailboxStatistics.Add($Statistic) | out-null
+  $null = $MailboxStatistics.Add($Statistic)
  }
 }
 
 foreach ($MailboxStatistic in $MailboxStatistics) {
- $MailBody = '<!DOCTYPE html>
+  $MailboxSize = $MailboxStatistic.MailboxSize
+  $TopFoldersBySize = $MailboxStatistic.TopFoldersBySize |
+    Select-Object @{
+      label="Ordnerpfad"; expression={$_.Folderpath}
+    }, @{
+        label="Größe"; expression={$str = $_.Foldersize; [string]$str + " MB"}
+      } | ConvertTo-Html -Fragment
+
+  $TopFoldersByItems = $MailboxStatistic.TopFoldersByItems |
+    Select-Object @{
+      label="Ordnerpfad"; expression={$_.Folderpath}
+    },
+    @{
+      label="Anzahl Elemente"; expression={$_.ItemsInFolder}
+    } | ConvertTo-Html -Fragment
+  $To =  $MailboxStatistic.EMail
+ $MailBody = @"
+ <!DOCTYPE html>
  <html lang="de">
   <head>
    <title>Mailbox Report</title>
@@ -43,31 +69,14 @@ foreach ($MailboxStatistic in $MailboxStatistics) {
    </style>
   </head>
  <body>
-  <h2>Mailbox Übersicht</h2>'
- 
- $MailboxSize = $MailboxStatistic.MailboxSize
- $MailBody += '<div><p>Ihr Postfach ist '
- $MailBody += $MailboxSize
- $MailBody += ' MB groß, bitte löschen Sie nicht mehr benötigte Daten aus Ihrem Postfach.</p></div>'
- 
- $TopFoldersBySize = $MailboxStatistic.TopFoldersBySize | select @{label="Ordnerpfad"; expression={$_.Folderpath}}, @{label="Größe"; expression={$str = $_.Foldersize; [string]$str + " MB"}} | ConvertTo-Html -Fragment
- $MailBody += '<div><p>Dies ist eine Übersicht ihrer '
- $MailBody += $CountTopFolder
- $MailBody += ' größten Ordner in ihrem Postfach:</p></div>'
- $MailBody += $TopFoldersBySize
- 
- $TopFoldersByItems = $MailboxStatistic.TopFoldersByItems | select @{label="Ordnerpfad"; expression={$_.Folderpath}}, @{label="Anzahl Elemente"; expression={$_.ItemsInFolder}} | ConvertTo-Html -Fragment
- $MailBody += '<div><p>Ordner mit vielen Elementen beeinträchtigen die Outlook Geschwindigkeit, löschen Sie nicht mehr benötigte Elemente um Outlook nicht zu verlangsamen. Dies sind Ihre '
- $MailBody += $CountTopFolder
- $MailBody +=' Ordner mit den meisten Elementen:</p></div>'
- $MailBody += $TopFoldersByItems
- 
- $MailBody += '<div><p>Hier finden Sie weitere Informationen: https://www.frankysweb.de</p></div>'
- $MailBody += '<div><p>Vielen Dank für Ihre Mithilfe</p></div>'
- 
- $MailBody += '</body>
-  </html>'
- 
- $To =  $MailboxStatistic.EMail
+  <h2>Mailbox Übersicht</h2>
+ <div><p>Ihr Postfach ist $MailboxSize MB groß, bitte löschen Sie nicht mehr benötigte Daten aus Ihrem Postfach.</p></div>
+ <div><p>Dies ist eine Übersicht ihrer $CountTopFolder größten Ordner in ihrem Postfach:</p></div>
+ $TopFoldersBySize
+ <div><p>Ordner mit vielen Elementen beeinträchtigen die Outlook Geschwindigkeit, löschen Sie nicht mehr benötigte Elemente um Outlook nicht zu verlangsamen.<br/>Dies sind Ihre $CountTopFolder Ordner mit den meisten Elementen:</p></div>
+ $TopFoldersByItems
+ </body></html>
+"@
+
  Send-MailMessage -SmtpServer $SMTPServer -From $From -To $To -Body $MailBody -BodyAsHtml -Encoding UTF8 -Subject $Subject
 }
